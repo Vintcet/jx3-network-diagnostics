@@ -1,0 +1,23 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.tmp/
+release/
+*.log
+
+# Local design document: keep on this computer, never commit.
+/docs/设计方案.md
+
+# Local settings, credentials and diagnostic dumps.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.dmp
+__pycache__/
+.DS_Store
+Thumbs.db

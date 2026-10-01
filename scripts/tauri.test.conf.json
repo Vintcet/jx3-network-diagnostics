@@ -1,0 +1,10 @@
+{
+  "app": {
+    "windows": [{
+      "label": "main", "title": "剑网三网络诊断 · 桌面验证",
+      "width": 1360, "height": 900, "minWidth": 1000, "minHeight": 720,
+      "devtools": true,
+      "additionalBrowserArgs": "--remote-debugging-port=49387 --remote-debugging-address=127.0.0.1"
+    }]
+  }
+}

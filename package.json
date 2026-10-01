@@ -1,0 +1,28 @@
+{
+  "name": "jx3-network-diagnostics",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "scripts\\desktop.cmd dev",
+    "dev:web": "vite --host 127.0.0.1",
+    "build:web": "tsc --noEmit && vite build",
+    "build": "scripts\\desktop.cmd build",
+    "check": "tsc --noEmit",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.5.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
