@@ -95,6 +95,22 @@ fn percentile(values: &[f64], p: f64) -> Option<f64> {
         )
     }
 }
+pub fn delay_threshold(role: &str, baseline: f64) -> f64 {
+    if role == "gateway" {
+        20.0f64.max(baseline * 3.0 + 5.0)
+    } else {
+        100.0f64.max(baseline * 2.0 + 20.0)
+    }
+}
+pub fn fill_thresholds(report: &mut Report) {
+    for s in &mut report.stats {
+        s.threshold_ms = if s.method == "ICMP" && s.assessable {
+            s.p50.map(|v| delay_threshold(&s.role, v))
+        } else {
+            None
+        };
+    }
+}
 pub fn statistics(probes: &[Probe]) -> Vec<TargetStats> {
     let mut groups = BTreeMap::<(&str, &str), Vec<&Probe>>::new();
     for p in probes {
@@ -156,6 +172,11 @@ pub fn statistics(probes: &[Probe]) -> Vec<TargetStats> {
                 },
                 longest_timeout_run: longest,
                 assessable: values.len() >= 10,
+                threshold_ms: if first.method == "ICMP" && values.len() >= 10 {
+                    percentile(&values, 0.5).map(|v| delay_threshold(&first.role, v))
+                } else {
+                    None
+                },
             }
         })
         .collect()
@@ -215,11 +236,7 @@ pub fn findings(
             if ps.len() < 3 {
                 continue;
             }
-            let threshold = if s.role == "gateway" {
-                20.0f64.max(s.p50.unwrap_or(0.0) * 3.0 + 5.0)
-            } else {
-                100.0f64.max(s.p50.unwrap_or(0.0) * 2.0 + 20.0)
-            };
+            let threshold = delay_threshold(&s.role, s.p50.unwrap_or(0.0));
             let abnormal = ps
                 .iter()
                 .filter(|p| {
@@ -264,9 +281,35 @@ pub fn findings(
             let mut evidence: Vec<String> = bad
                 .iter()
                 .map(|s| {
+                    let baseline = s.p50.unwrap_or(0.0);
+                    let threshold = delay_threshold(&s.role, baseline);
+                    let values = window_probes
+                        .iter()
+                        .filter(|p| {
+                            p.target == s.target
+                                && p.method == "ICMP"
+                                && (p.status == "timeout"
+                                    || (p.status == "ok" && p.ms.is_some_and(|v| v > threshold)))
+                        })
+                        .map(|p| {
+                            let at = chrono::DateTime::parse_from_rfc3339(&p.at)
+                                .map(|v| {
+                                    v.with_timezone(&chrono::Local)
+                                        .format("%H:%M:%S")
+                                        .to_string()
+                                })
+                                .unwrap_or_else(|_| format!("第 {:.1} 秒", p.elapsed));
+                            if p.status == "timeout" {
+                                format!("{at} 等待 800 ms 后未收到回应")
+                            } else {
+                                format!("{at} 实测 {:.1} ms", p.ms.unwrap_or(0.0))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("；");
                     format!(
-                        "{}（{}）在此 10 秒窗口内至少两次超时或超过本次基线阈值。",
-                        s.label, s.target
+                        "{}（{}）：基线 {:.1} ms，异常阈值 {:.1} ms。本窗口异常样本：{}。",
+                        s.label, s.target, baseline, threshold, values
                     )
                 })
                 .collect();
@@ -382,7 +425,8 @@ pub fn html(report: &Report) -> String {
         format!("<section><h2>连接地址变化记录</h2><p>下列时间为观测时间。中转上游候选不等于最终游戏服务器；时间重合不能单独证明跨服导致卡顿。</p><ul>{}</ul></section>",report.connection_changes.iter().map(|c|format!("<li>第 {:.1} 秒：{} {} {}:{}（{}）</li>",c.elapsed,match c.kind.as_str(){"first_seen"=>"首次看到地址","left_table"=>"连接表不再显示","resumed"=>"地址再次出现",_=>"近期无收发"},esc(&c.endpoint.protocol),esc(&c.endpoint.ip),c.endpoint.port,if c.endpoint.source=="relay"{"中转上游候选"}else{"游戏进程"})).collect::<String>())
     };
     let ms = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into());
-    let rows = report.stats.iter().map(|s|format!("<tr><td>{}<small>{}</small></td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",esc(&s.label),esc(&s.target),esc(&s.method),s.success,s.sent,s.timeouts,s.errors,ms(s.p50),ms(s.p95))).collect::<String>();
+    let rules = crate::report_text::RULES;
+    let rows = report.stats.iter().map(|s|format!("<tr><td>{}<small>{}</small></td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",esc(&s.label),esc(&s.target),esc(&s.method),s.success,s.sent,s.timeouts,s.errors,ms(s.p50),if s.method=="ICMP"{ms(s.threshold_ms)}else{"不适用".into()},ms(s.p95))).collect::<String>();
     let findings = report.findings.iter().map(|f|format!("<article><h2>{}</h2><p>{}–{}（第 {:.0} 秒起） · 把握：{}</p><ul>{}</ul><p><b>建议：</b>{}</p></article>",esc(&f.title),local_at(f.start),local_at(f.end),f.start,esc(&f.confidence),f.evidence.iter().map(|e|format!("<li>{}</li>",esc(e))).collect::<String>(),esc(&f.suggestion))).collect::<String>();
     let events = report
         .events
@@ -396,7 +440,7 @@ pub fn html(report: &Report) -> String {
             )
         })
         .collect::<String>();
-    format!("<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'><title>网络诊断报告</title><style>body{{font:16px/1.7 'Segoe UI','Microsoft YaHei',sans-serif;color:#203047;max-width:1080px;margin:40px auto;padding:0 24px;background:#f2f5f8}}article,section{{background:white;padding:24px;margin:20px 0;border-radius:8px}}h1{{font-size:28px}}h2{{font-size:20px}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #dce2e9}}small{{display:block;color:#546376}}li{{margin:5px 0}}p{{overflow-wrap:anywhere}}@media print{{body{{background:white;margin:0}}article{{break-inside:avoid}}}}</style><h1>剑网三网络诊断报告</h1>{readout}<p>{} / {}<br>开始：{}<br>结束：{}<br>持续 {:.1} 秒 / 计划 {} 秒　状态：{}</p><section><h2>测量结果</h2><p>超时次数属于对应探测方式，不能视作游戏丢包率。延迟单位 ms。</p><table><thead><tr><th>目标</th><th>方式</th><th>成功/发送</th><th>超时</th><th>其他错误</th><th>通常延迟</th><th>95% 上限</th></tr></thead><tbody>{rows}</tbody></table></section>{findings}{changes}<section><h2>事件时间线</h2><ul>{events}</ul></section><section><h2>观测范围</h2><p>{}</p><ul>{}</ul><p>原始日志：{}</p></section></html>",esc(&report.server.area),esc(&report.server.name),esc(&local_stamp(&report.started_at)),esc(&local_stamp(&report.ended_at)),report.duration_seconds,report.requested_seconds,esc(&report.status),esc(&report.traffic_status.message),report.limitations.iter().map(|s|format!("<li>{}</li>",esc(s))).collect::<String>(),esc(&report.log_dir))
+    format!("<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'><title>网络诊断报告</title><style>body{{font:16px/1.7 'Segoe UI','Microsoft YaHei',sans-serif;color:#203047;max-width:1080px;margin:40px auto;padding:0 24px;background:#f2f5f8}}article,section{{background:white;padding:24px;margin:20px 0;border-radius:8px}}h1{{font-size:28px}}h2{{font-size:20px}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #dce2e9}}small{{display:block;color:#546376}}li{{margin:5px 0}}p{{overflow-wrap:anywhere}}@media print{{body{{background:white;margin:0}}article{{break-inside:avoid}}}}</style><h1>剑网三网络诊断报告</h1>{readout}<p>{} / {}<br>开始：{}<br>结束：{}<br>持续 {:.1} 秒 / 计划 {} 秒　状态：{}</p><section><h2>测量结果</h2><p>超时次数属于对应探测方式，不能视作游戏丢包率。延迟单位 ms。</p><table><thead><tr><th>目标</th><th>方式</th><th>成功/发送</th><th>超时</th><th>其他错误</th><th>基线 P50</th><th>异常阈值</th><th>95% 上限</th></tr></thead><tbody>{rows}</tbody></table></section><section><h2>判定规则</h2><p>{rules}</p></section>{findings}{changes}<section><h2>事件时间线</h2><ul>{events}</ul></section><section><h2>观测范围</h2><p>{}</p><ul>{}</ul><p>原始日志：{}</p></section></html>",esc(&report.server.area),esc(&report.server.name),esc(&local_stamp(&report.started_at)),esc(&local_stamp(&report.ended_at)),report.duration_seconds,report.requested_seconds,esc(&report.status),esc(&report.traffic_status.message),report.limitations.iter().map(|s|format!("<li>{}</li>",esc(s))).collect::<String>(),esc(&report.log_dir))
 }
 #[cfg(test)]
 mod tests {
@@ -413,6 +457,33 @@ mod tests {
             ms,
             detail: None,
         }
+    }
+    #[test]
+    fn threshold_and_evidence_include_actual_values() {
+        assert_eq!(delay_threshold("server", 43.0), 106.0);
+        assert_eq!(delay_threshold("gateway", 2.0), 20.0);
+        let ps = (0..30)
+            .map(|i| {
+                sample(
+                    "server",
+                    i as f64 * 2.0,
+                    "ok",
+                    Some(if i >= 20 { 150.0 } else { 40.0 }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let stats = statistics(&ps);
+        assert_eq!(stats[0].threshold_ms, Some(100.0));
+        let output = findings(&ps, &[], &[], 60.0);
+        let evidence = output
+            .iter()
+            .flat_map(|f| &f.evidence)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(evidence.contains("基线 40.0 ms"));
+        assert!(evidence.contains("阈值 100.0 ms"));
+        assert!(evidence.contains("实测 150.0 ms"));
     }
     #[test]
     fn nonresponsive_is_not_packet_loss_diagnosis() {

@@ -4,6 +4,8 @@ mod catalog;
 mod model;
 mod platform;
 mod probe;
+mod report_text;
+mod sample_log;
 mod session;
 mod tracking;
 mod traffic;
@@ -80,8 +82,22 @@ fn get_history(state: State<'_, Manager>) -> Vec<HistoryItem> {
     state.history()
 }
 #[tauri::command]
-fn get_report(state: State<'_, Manager>, id: String) -> Result<Report, String> {
-    state.report(&id)
+async fn get_report(state: State<'_, Manager>, id: String) -> Result<Report, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || Manager::new(root).report(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn export_report(state: State<'_, Manager>, id: String) -> Result<String, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Manager::new(root)
+            .export_report(&id)
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn open_logs(state: State<'_, Manager>, id: String) -> Result<(), String> {
@@ -94,6 +110,51 @@ fn open_logs(state: State<'_, Manager>, id: String) -> Result<(), String> {
 }
 
 fn main() {
+    let utility_args = std::env::args().collect::<Vec<_>>();
+    if let Some(input) = utility_args
+        .windows(2)
+        .find(|a| a[0] == "--compact-log")
+        .map(|a| &a[1])
+    {
+        let Some(output) = utility_args
+            .windows(2)
+            .find(|a| a[0] == "--output")
+            .map(|a| &a[1])
+        else {
+            eprintln!("需要 --output 路径");
+            std::process::exit(1);
+        };
+        match sample_log::compact_existing(
+            std::path::Path::new(input),
+            std::path::Path::new(output),
+        ) {
+            Ok((before, after)) => println!(
+                "{}",
+                serde_json::json!({"beforeBytes":before,"afterBytes":after})
+            ),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(id) = utility_args
+        .windows(2)
+        .find(|a| a[0] == "--export-report")
+        .map(|a| &a[1])
+    {
+        let root = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
+            .join("com.jx3.network-diagnostics");
+        match Manager::new(root).export_report(id) {
+            Ok(path) => println!("{}", path.display()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if std::env::args().any(|a| a == "--self-check") {
         let root = std::env::current_dir()
             .unwrap()
@@ -170,6 +231,7 @@ fn main() {
             get_session,
             get_history,
             get_report,
+            export_report,
             open_logs
         ])
         .on_window_event(|window, event| {

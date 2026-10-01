@@ -1,6 +1,6 @@
 [package]
 name = "jx3-network-diagnostics"
-version = "0.2.0"
+version = "0.3.0"
 description = "剑网三网络诊断"
 edition = "2021"
 default-run = "jx3-network-diagnostics"
@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 encoding_rs = "0.8"
+flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",

@@ -218,6 +218,8 @@ pub struct TargetStats {
     pub jitter: Option<f64>,
     pub longest_timeout_run: usize,
     pub assessable: bool,
+    #[serde(default)]
+    pub threshold_ms: Option<f64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -258,6 +260,14 @@ pub struct Report {
     pub relay_processes: Vec<ProcessInfo>,
     #[serde(default)]
     pub summary: ReportSummary,
+    #[serde(default)]
+    pub environment: Option<Environment>,
+    #[serde(default)]
+    pub game_process: Option<ProcessInfo>,
+    #[serde(default)]
+    pub raw_log_bytes: u64,
+    #[serde(default)]
+    pub log_format: String,
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

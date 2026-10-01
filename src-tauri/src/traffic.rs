@@ -19,7 +19,7 @@ pub struct Bytes {
     pub sent: u64,
     pub earliest: u64,
 }
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameFlow {
     pub pid: u32,

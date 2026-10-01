@@ -3,15 +3,17 @@ use crate::{
     catalog,
     model::*,
     platform, probe,
+    sample_log::CompactSamples,
     tracking::GameTracker,
     traffic::TrafficMonitor,
 };
+type SampleWriter = BufWriter<flate2::write::GzEncoder<File>>;
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -65,16 +67,20 @@ impl Manager {
                 return Err("所选进程已退出或身份变化，请刷新进程列表后重新选择".into());
             }
         }
-        let id = format!(
-            "{}-{}",
-            chrono::Local::now().format("%Y%m%d-%H%M%S-%3f"),
+        let folder_prefix = format!(
+            "{}_{}-{}_{}",
+            chrono::Local::now().format("%Y-%m-%d_%H-%M-%S-%3f"),
+            folder_label(&config.server.area),
+            folder_label(&config.server.name),
             std::process::id()
         );
-        let dir = self.root.join("sessions").join(&id);
-        fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录：{e}"))?;
-        let file = File::create(dir.join("samples.jsonl")).map_err(|e| e.to_string())?;
+        let (id, dir) = create_session_directory(&self.root.join("sessions"), &folder_prefix)?;
+        let file = File::create(dir.join("samples.jsonl.gz")).map_err(|e| e.to_string())?;
         let started_at = now();
-        fs::write(dir.join("session.json"),serde_json::to_vec_pretty(&json!({"schemaVersion":1,"id":id,"startedAt":started_at,"config":config,"catalogSource":c.source,"catalogDate":c.fetched_at})).unwrap()).map_err(|e|e.to_string())?;
+        let overview = format!("本次网络测试\n\n区服：{} / {}\n开始时间：{}\n计划时长：{} 秒\n记录编号：{}\n\n本文件夹只保存这一次测试的资料。\nreport.html：测试结束后生成，可直接打开的诊断报告。\nreport.json：同一份报告的结构化数据。\nsamples.jsonl.gz：精简并压缩的本次原始采样与变化记录。\n诊断报告.md：适合直接阅读或交给 AI 的中文报告。\nsession.json：本次测试配置。\n\n这些文件属于同一次测试；下次测试会创建新的独立文件夹。\n",config.server.area,config.server.name,chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),config.duration_seconds,id);
+        fs::write(dir.join("本次测试说明.txt"), overview)
+            .map_err(|e| format!("无法写入本次测试说明：{e}"))?;
+        fs::write(dir.join("session.json"),serde_json::to_vec_pretty(&json!({"schemaVersion":2,"logFormat":"compact-delta-v2+gzip","id":id,"startedAt":started_at,"config":config,"catalogSource":c.source,"catalogDate":c.fetched_at})).unwrap()).map_err(|e|e.to_string())?;
         self.stop.store(false, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         *self.marker.lock().unwrap() = Some(tx);
@@ -139,7 +145,7 @@ impl Manager {
         }
     }
     pub fn directory(&self, id: &str) -> Result<PathBuf, String> {
-        if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit() || c == '-') {
+        if !valid_session_id(id) {
             return Err("记录标识无效".into());
         }
         let dir = self.root.join("sessions").join(id);
@@ -158,7 +164,10 @@ impl Manager {
             if self.directory(&id).is_err() {
                 continue;
             }
-            if let Ok(report) = self.report(&id) {
+            let stored_report = fs::read(entry.path().join("report.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Report>(&bytes).ok());
+            if let Some(report) = stored_report {
                 out.push(HistoryItem {
                     id,
                     server_name: report.server.name,
@@ -181,7 +190,11 @@ impl Manager {
                 }
             }
         }
-        out.sort_by(|a, b| b.id.cmp(&a.id));
+        out.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
         out.truncate(200);
         out
     }
@@ -192,15 +205,37 @@ impl Manager {
         )
         .map_err(|e| e.to_string())?;
         // Older reports did not store relay attribution. Read only the startup snapshot.
-        if report.relay_processes.is_empty() && report.game_endpoints.is_empty() {
+        if report.environment.is_none()
+            || report.game_process.is_none()
+            || (report.relay_processes.is_empty() && report.game_endpoints.is_empty())
+        {
             if let Ok(file) = File::open(dir.join("samples.jsonl")) {
-                for line in BufReader::new(file).lines().take(20).map_while(Result::ok) {
+                for line in BufReader::new(file)
+                    .lines()
+                    .take(4096)
+                    .map_while(Result::ok)
+                {
+                    if !line.contains("\"type\":\"tick\"") {
+                        continue;
+                    }
                     let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                         continue;
                     };
                     if value["type"] == "tick" {
                         if let Ok(tick) = serde_json::from_value::<Tick>(value["data"].clone()) {
-                            if let Some(pid) = tick.game_pid {
+                            report
+                                .environment
+                                .get_or_insert_with(|| tick.environment.clone());
+                            if report.game_process.is_none() {
+                                report.game_process = tick
+                                    .processes
+                                    .iter()
+                                    .find(|p| Some(p.pid) == tick.game_pid)
+                                    .cloned();
+                            }
+                            if let Some(pid) =
+                                tick.game_pid.filter(|_| report.relay_processes.is_empty())
+                            {
                                 let pids = crate::tracking::relay_pids(pid, &tick.connections);
                                 report.relay_processes = tick
                                     .processes
@@ -214,8 +249,104 @@ impl Manager {
                 }
             }
         }
+        crate::report_text::refresh_legacy_evidence(&mut report, &dir)?;
         report.summary = analysis::summarize(&report);
         Ok(report)
+    }
+    pub fn export_report(&self, id: &str) -> Result<PathBuf, String> {
+        let report = self.report(id)?;
+        let path = self.directory(id)?.join("诊断报告.md");
+        fs::write(&path, crate::report_text::markdown(&report)).map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+}
+fn folder_label(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .take(32)
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "未命名".into()
+    } else {
+        cleaned
+    }
+}
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().count() <= 160
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+fn create_session_directory(parent: &Path, prefix: &str) -> Result<(String, PathBuf), String> {
+    if !valid_session_id(prefix) {
+        return Err("测试文件夹名称无效".into());
+    }
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建报告目录：{e}"))?;
+    for index in 0..1000 {
+        let id = if index == 0 {
+            prefix.to_string()
+        } else {
+            format!("{prefix}_{index}")
+        };
+        let dir = parent.join(&id);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok((id, dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("无法创建本次测试文件夹：{e}")),
+        }
+    }
+    Err("无法分配独立的测试文件夹，请稍后重试".into())
+}
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+    #[test]
+    fn supports_old_ids_and_readable_names_without_path_traversal() {
+        assert!(valid_session_id("20261001-225209-629-8784"));
+        assert!(valid_session_id(
+            "2026-10-02_01-30-00-123_电信区-唯我独尊_12345"
+        ));
+        for invalid in [
+            "",
+            "../other",
+            "..\\other",
+            "C:\\reports",
+            "a/b",
+            ".",
+            "a:b",
+        ] {
+            assert!(!valid_session_id(invalid));
+        }
+        assert_eq!(folder_label("电信区/唯我:独尊"), "电信区_唯我_独尊");
+    }
+    #[test]
+    fn each_allocation_has_its_own_directory_and_preserves_previous_report() {
+        let parent = std::env::temp_dir().join(format!(
+            "jx3-folders-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let (_, first) = create_session_directory(&parent, "2026-10-02_唯我独尊").unwrap();
+        fs::write(first.join("report.json"), "previous report").unwrap();
+        let (_, second) = create_session_directory(&parent, "2026-10-02_唯我独尊").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            fs::read_to_string(first.join("report.json")).unwrap(),
+            "previous report"
+        );
+        assert!(!second.join("report.json").exists());
+        fs::remove_file(first.join("report.json")).unwrap();
+        fs::remove_dir(first).unwrap();
+        fs::remove_dir(second).unwrap();
+        fs::remove_dir(parent).unwrap();
     }
 }
 impl Drop for Manager {
@@ -225,7 +356,7 @@ impl Drop for Manager {
     }
 }
 fn record(
-    writer: &mut BufWriter<File>,
+    writer: &mut SampleWriter,
     kind: &str,
     data: &impl serde::Serialize,
 ) -> Result<(), String> {
@@ -236,7 +367,7 @@ fn record(
         .map_err(|e| format!("日志写入失败：{e}"))
 }
 fn event(
-    writer: &mut BufWriter<File>,
+    writer: &mut SampleWriter,
     events: &mut Vec<Event>,
     start: Instant,
     kind: &str,
@@ -289,7 +420,16 @@ fn run(
     let (config, servers) = selection;
     let (id, started_at) = identity;
     let start = Instant::now();
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(flate2::write::GzEncoder::new(
+        file,
+        flate2::Compression::fast(),
+    ));
+    let mut compact = CompactSamples::default();
+    record(
+        &mut writer,
+        "format",
+        &json!({"version":2,"mode":"compact-delta","processTraffic":"Nonzero observed traffic plus selected game and relays; omitted zero rows are not evidence of complete network inactivity","compression":"gzip"}),
+    )?;
     let mut events = vec![];
     let mut probes = vec![];
     let mut activities = vec![];
@@ -299,6 +439,7 @@ fn run(
     let mut route_target = server_ip.clone();
     let mut env = platform::environment(Some(server_ip));
     env.wifi = platform::wifi();
+    let initial_environment = env.clone();
     record(&mut writer, "environment", &env)?;
     event(
         &mut writer,
@@ -312,6 +453,7 @@ fn run(
         ),
     )?;
     let mut game = config.game_pid.map(|pid| platform::process(pid, "").0);
+    let initial_game = game.clone();
     let remembered_path = game.as_ref().and_then(|p| p.path.clone());
     let mut game_pid = game.as_ref().map(|p| p.pid);
     let mut tracker = GameTracker::new(servers);
@@ -545,12 +687,8 @@ fn run(
         tracker.set_relays(relays);
         let (raw, game_flows, new_status) = monitor.sample();
         status = new_status;
-        if !game_flows.is_empty() {
-            record(
-                &mut writer,
-                "game_flows",
-                &json!({"elapsed":elapsed,"flows":game_flows}),
-            )?;
+        for entry in compact.flows(elapsed, &game_flows) {
+            record(&mut writer, entry.kind, &entry.data)?;
         }
         if let Some(change) = tracker.update(
             elapsed,
@@ -808,7 +946,9 @@ fn run(
             game_pid,
             tracking: tracker.snapshot.clone(),
         };
-        record(&mut writer, "tick", &tick)?;
+        for entry in compact.tick(&tick) {
+            record(&mut writer, entry.kind, &entry.data)?;
+        }
         {
             let mut v = view.lock().unwrap();
             while let Ok(measurement) = rx.try_recv() {
@@ -845,6 +985,7 @@ fn run(
         writer.flush().map_err(|e| format!("日志刷新失败：{e}"))?;
         if sampling_tick.is_multiple_of(5) {
             writer
+                .get_ref()
                 .get_ref()
                 .sync_data()
                 .map_err(|e| format!("日志落盘失败：{e}"))?;
@@ -915,7 +1056,13 @@ fn run(
     )?;
     record(&mut writer, "activities", &activities)?;
     writer.flush().map_err(|e| e.to_string())?;
-    writer.get_ref().sync_data().map_err(|e| e.to_string())?;
+    let log_file = writer
+        .into_inner()
+        .map_err(|e| e.to_string())?
+        .finish()
+        .map_err(|e| e.to_string())?;
+    log_file.sync_data().map_err(|e| e.to_string())?;
+    let raw_log_bytes = log_file.metadata().map_err(|e| e.to_string())?.len();
     let mut limitations=vec!["仅覆盖测试时段与可测目标；ICMP 超时不是游戏丢包率，TCP 建连不是业务延迟。".into(),"中间路由节点不回应不能单独证明链路丢包；无法仅凭单端观测区分去程、回程与服务端内部问题。".into(),"每进程流量是 ETW 观测字节，存在交付延迟；代理、加速器和回环流量可能重复观察，不能简单相加。".into(),"无法读取创建时间的进程不归属流量；IPv6 主动探测、帧时间与 TCP 重传尚未覆盖。游戏 UDP 远端依赖可用的网络事件。".into(),"连接变化可能来自地图、跨服或其他业务，不能证明物理服务器切换；同一接入地址背后的转发不可见。目录匹配只标识已知接入地址。".into(),"本机看不到家庭其他设备占用、光猫光功率及真实宽带带宽上限。".into()];
     limitations.extend(env.notes.clone());
     if status.lost_events > 0 || status.unparsed_events > 0 {
@@ -925,7 +1072,7 @@ fn run(
         ));
     }
     let mut report = Report {
-        schema_version: 2,
+        schema_version: 3,
         id,
         started_at,
         ended_at: now(),
@@ -944,6 +1091,10 @@ fn run(
         connection_changes: tracker.connection_changes,
         relay_processes: relay_history.into_values().collect(),
         summary: ReportSummary::default(),
+        environment: Some(initial_environment),
+        game_process: initial_game,
+        raw_log_bytes,
+        log_format: "compact-delta-v2 + gzip".into(),
     };
     report
         .findings
@@ -951,6 +1102,11 @@ fn run(
     report.summary = analysis::summarize(&report);
     fs::write(dir.join("report.html"), analysis::html(&report))
         .map_err(|e| format!("报告写入失败：{e}"))?;
+    fs::write(
+        dir.join("诊断报告.md"),
+        crate::report_text::markdown(&report),
+    )
+    .map_err(|e| format!("中文报告写入失败：{e}"))?;
     fs::write(
         dir.join("report.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

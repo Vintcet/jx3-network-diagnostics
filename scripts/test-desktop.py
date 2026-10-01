@@ -1,5 +1,6 @@
 """Exercise real Tauri IPC in this application's own WebView2 instance."""
 import json
+import gzip
 import os
 from pathlib import Path
 import socket
@@ -83,9 +84,13 @@ try:
         assert view['status'] == 'stopped', view
         assert any(e['kind'] == 'marker' for e in view['report']['events'])
         log_dir = Path(view['logDir'])
-        records = [json.loads(line) for line in (log_dir / 'samples.jsonl').read_text(encoding='utf-8').splitlines()]
-        assert {'tick', 'probe', 'event'} <= {r['type'] for r in records}
+        with gzip.open(log_dir / 'samples.jsonl.gz', 'rt', encoding='utf-8') as stream:
+            records = [json.loads(line) for line in stream]
+        assert {'sample', 'probe', 'event'} <= {r['type'] for r in records}
         assert (log_dir / 'report.html').exists()
+        assert (log_dir / '诊断报告.md').exists()
+        assert (log_dir / '本次测试说明.txt').exists()
+        assert view['report']['server']['name'] in log_dir.name
         (out / 'result.json').write_text(json.dumps({'status': view['status'], 'logDir': view['logDir'], 'records': len(records), 'traffic': view['report']['trafficStatus'], 'errors': errors}, ensure_ascii=False, indent=2), encoding='utf-8')
         page.screenshot(path=str(out / 'report.png'), full_page=True)
         page.get_by_role('button', name='测试记录', exact=True).click()
@@ -98,6 +103,9 @@ try:
         if previous:
             restored = page.evaluate("id => window.__TAURI_INTERNALS__.invoke('get_report', {id})", previous['id'])
             assert restored['summary']['headline'] and restored['summary']['facts']
+            exported = page.evaluate("id => window.__TAURI_INTERNALS__.invoke('export_report', {id})", previous['id'])
+            markdown = Path(exported).read_text(encoding='utf-8')
+            assert '实际异常阈值' in markdown and '基线' in markdown
             (out / 'restored-report.json').write_text(json.dumps(restored, ensure_ascii=False, indent=2), encoding='utf-8')
             page.get_by_role('button', name='测试记录', exact=True).click()
             index = next(i for i, item in enumerate(saved) if item['id'] == previous['id'])
