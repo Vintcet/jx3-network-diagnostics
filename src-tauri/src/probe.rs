@@ -161,6 +161,7 @@ pub fn trace(ip: &str, stop: &std::sync::atomic::AtomicBool, mut emit: impl FnMu
         let (status, ms, address, _) = echo(ip, ttl, 500);
         let done = status == "ok";
         emit(Hop {
+            target: ip.to_string(),
             ttl,
             address,
             ms,

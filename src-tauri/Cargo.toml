@@ -1,6 +1,6 @@
 [package]
 name = "jx3-network-diagnostics"
-version = "0.1.0"
+version = "0.2.0"
 description = "剑网三网络诊断"
 edition = "2021"
 default-run = "jx3-network-diagnostics"

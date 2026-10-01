@@ -3,13 +3,14 @@ use crate::{
     catalog,
     model::*,
     platform, probe,
+    tracking::GameTracker,
     traffic::TrafficMonitor,
 };
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -54,8 +55,9 @@ impl Manager {
         let c = catalog::load(&self.root, false);
         config.server = c
             .servers
-            .into_iter()
+            .iter()
             .find(|s| s.id == config.server.id)
+            .cloned()
             .ok_or("区服已变更，请重新选择")?;
         if let Some(pid) = config.game_pid {
             let p = platform::process(pid, "").0;
@@ -89,7 +91,7 @@ impl Manager {
         *worker = Some(thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run(
-                    config,
+                    (config, c.servers),
                     (run_id, started_at),
                     dir,
                     file,
@@ -184,11 +186,36 @@ impl Manager {
         out
     }
     pub fn report(&self, id: &str) -> Result<Report, String> {
-        serde_json::from_slice(
-            &fs::read(self.directory(id)?.join("report.json"))
-                .map_err(|_| "此记录尚无完整报告，原始日志已保留")?,
+        let dir = self.directory(id)?;
+        let mut report: Report = serde_json::from_slice(
+            &fs::read(dir.join("report.json")).map_err(|_| "此记录尚无完整报告，原始日志已保留")?,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        // Older reports did not store relay attribution. Read only the startup snapshot.
+        if report.relay_processes.is_empty() && report.game_endpoints.is_empty() {
+            if let Ok(file) = File::open(dir.join("samples.jsonl")) {
+                for line in BufReader::new(file).lines().take(20).map_while(Result::ok) {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    if value["type"] == "tick" {
+                        if let Ok(tick) = serde_json::from_value::<Tick>(value["data"].clone()) {
+                            if let Some(pid) = tick.game_pid {
+                                let pids = crate::tracking::relay_pids(pid, &tick.connections);
+                                report.relay_processes = tick
+                                    .processes
+                                    .into_iter()
+                                    .filter(|p| pids.contains(&p.pid))
+                                    .collect();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        report.summary = analysis::summarize(&report);
+        Ok(report)
     }
 }
 impl Drop for Manager {
@@ -251,7 +278,7 @@ impl Drop for ProbeWorkers {
     }
 }
 fn run(
-    config: StartConfig,
+    selection: (StartConfig, Vec<Server>),
     identity: (String, String),
     dir: PathBuf,
     file: File,
@@ -259,6 +286,7 @@ fn run(
     stop: Arc<AtomicBool>,
     markers: mpsc::Receiver<()>,
 ) -> Result<(), String> {
+    let (config, servers) = selection;
     let (id, started_at) = identity;
     let start = Instant::now();
     let mut writer = BufWriter::new(file);
@@ -268,6 +296,7 @@ fn run(
     let mut monitor = TrafficMonitor::start();
     let mut cpu = platform::CpuSampler::new();
     let server_ip = &config.server.endpoints[0].ip;
+    let mut route_target = server_ip.clone();
     let mut env = platform::environment(Some(server_ip));
     env.wifi = platform::wifi();
     record(&mut writer, "environment", &env)?;
@@ -285,16 +314,35 @@ fn run(
     let mut game = config.game_pid.map(|pid| platform::process(pid, "").0);
     let remembered_path = game.as_ref().and_then(|p| p.path.clone());
     let mut game_pid = game.as_ref().map(|p| p.pid);
+    let mut tracker = GameTracker::new(servers);
+    monitor.set_processes(
+        game.iter()
+            .filter_map(|p| p.started.as_ref()?.parse().ok().map(|start| (p.pid, start)))
+            .collect(),
+    );
     let targets = Arc::new(Mutex::new(Vec::<Target>::new()));
     let (tx, rx) = mpsc::channel::<Measurement>();
     let probe_stop = Arc::new(AtomicBool::new(false));
     let route_stop = probe_stop.clone();
     let route_tx = tx.clone();
-    let route_ip = server_ip.clone();
+    let (route_requests, route_receiver) = mpsc::channel::<String>();
+    let _ = route_requests.send(server_ip.clone());
     let trace_thread = thread::spawn(move || {
-        probe::trace(&route_ip, &route_stop, |h| {
-            let _ = route_tx.send(Measurement::Hop(h));
-        })
+        while !route_stop.load(Ordering::Relaxed) {
+            match route_receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(mut ip) => {
+                    // If several transitions happened during a trace, inspect the latest target.
+                    while let Ok(newer) = route_receiver.try_recv() {
+                        ip = newer;
+                    }
+                    probe::trace(&ip, &route_stop, |h| {
+                        let _ = route_tx.send(Measurement::Hop(h));
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
     });
     let active_targets = targets.clone();
     let timer_stop = probe_stop.clone();
@@ -316,7 +364,7 @@ fn run(
                 pending.push(thread::spawn(move || {
                     let p = probe::icmp(&t.ip, &t.label, &t.role, elapsed);
                     let _ = tx.send(Measurement::Probe(p));
-                    if tcp_due {
+                    if tcp_due && start.elapsed().as_secs_f64() < duration {
                         if let Some(port) = t.port {
                             let p =
                                 probe::tcp(&t.ip, port, &t.label, start.elapsed().as_secs_f64());
@@ -342,11 +390,14 @@ fn run(
     let mut totals = HashMap::<(u32, u64), (u64, u64)>::new();
     let mut latest_connections = vec![];
     let mut last_keys = HashSet::new();
-    let mut last_endpoints = HashSet::<String>::new();
+    let mut last_traced = server_ip.clone();
+    let mut last_trace_request = 0.0;
     let mut known_errors = HashSet::new();
     let mut last_sample = Instant::now();
     let mut sampling_tick = 0u32;
     let mut status = TrafficStatus::default();
+    let mut relay_history = HashMap::<(u32, String), ProcessInfo>::new();
+    let mut last_relays = Vec::<u32>::new();
     loop {
         let elapsed = start.elapsed().as_secs_f64();
         if elapsed >= duration || stop.load(Ordering::Relaxed) {
@@ -367,7 +418,7 @@ fn run(
                 "玩家标记：刚刚卡了／掉线了".into(),
             )?;
         }
-        let mut next_env = platform::environment(Some(server_ip));
+        let mut next_env = platform::environment(Some(&route_target));
         next_env.wifi = if sampling_tick.is_multiple_of(15) {
             platform::wifi()
         } else {
@@ -468,8 +519,111 @@ fn run(
                 )?;
             }
         }
-        let (raw, new_status) = monitor.sample();
+        let relay_ids = game_pid
+            .map(|pid| crate::tracking::relay_pids(pid, &latest_connections))
+            .unwrap_or_default();
+        let relays = relay_ids
+            .iter()
+            .map(|pid| platform::process(*pid, "").0)
+            .filter(|p| p.started.is_some())
+            .collect::<Vec<_>>();
+        if relay_ids != last_relays {
+            event(&mut writer,&mut events,start,"relay","info",format!("游戏本地中转连接：{}。这些进程的上游作为加速/代理候选单独观测，不能推断最终游戏服。",if relays.is_empty(){"未发现可反查的中转进程".into()}else{relays.iter().map(|p|format!("{}（PID {}）",p.name,p.pid)).collect::<Vec<_>>().join("、")}))?;
+            last_relays = relay_ids;
+        }
+        for p in &relays {
+            if let Some(started) = &p.started {
+                relay_history.insert((p.pid, started.clone()), p.clone());
+            }
+        }
+        monitor.set_processes(
+            game.iter()
+                .chain(relays.iter())
+                .filter_map(|p| p.started.as_ref()?.parse().ok().map(|start| (p.pid, start)))
+                .collect(),
+        );
+        tracker.set_relays(relays);
+        let (raw, game_flows, new_status) = monitor.sample();
         status = new_status;
+        if !game_flows.is_empty() {
+            record(
+                &mut writer,
+                "game_flows",
+                &json!({"elapsed":elapsed,"flows":game_flows}),
+            )?;
+        }
+        if let Some(change) = tracker.update(
+            elapsed,
+            game.as_ref(),
+            &latest_connections,
+            &game_flows,
+            status.available && status.endpoint_events > 0,
+        ) {
+            record(&mut writer, "target_transition", &change)?;
+            event(
+                &mut writer,
+                &mut events,
+                start,
+                "target_transition",
+                "info",
+                format!(
+                    "重点观测连接：{} → {}。{}",
+                    change.from.as_deref().unwrap_or("尚未关联"),
+                    change.to.as_deref().unwrap_or("等待连接"),
+                    change.reason
+                ),
+            )?;
+        }
+        for change in &tracker.changes_in_tick {
+            record(&mut writer, "endpoint_change", change)?;
+            let label = match change.kind.as_str() {
+                "first_seen" => "首次观察到地址",
+                "resumed" => "地址再次出现",
+                "left_table" => "连接表中不再出现",
+                "quiet" => "近期未再观察到收发",
+                _ => "连接变化",
+            };
+            event(
+                &mut writer,
+                &mut events,
+                start,
+                "endpoint_change",
+                "info",
+                format!(
+                    "{}：{} {}:{}（{}，{}）。",
+                    label,
+                    change.endpoint.protocol,
+                    change.endpoint.ip,
+                    change.endpoint.port,
+                    change.endpoint.process_name,
+                    if change.endpoint.source == "relay" {
+                        "中转上游候选"
+                    } else {
+                        "游戏进程连接"
+                    }
+                ),
+            )?;
+        }
+        route_target = tracker
+            .snapshot
+            .primary_ip
+            .as_ref()
+            .filter(|ip| ip.parse().is_ok_and(catalog::public_v4))
+            .cloned()
+            .unwrap_or_else(|| server_ip.clone());
+        if route_target != last_traced && elapsed - last_trace_request >= 5.0 {
+            let _ = route_requests.send(route_target.clone());
+            last_traced = route_target.clone();
+            last_trace_request = elapsed;
+            event(
+                &mut writer,
+                &mut events,
+                start,
+                "route_target",
+                "info",
+                format!("路径检查切换到当前活动目标 {route_target}。"),
+            )?;
+        }
         if sampling_tick == 0 {
             event(
                 &mut writer,
@@ -573,33 +727,6 @@ fn run(
             }
         }
         last_keys = current_keys;
-        let game_endpoints: HashSet<_> = latest_connections
-            .iter()
-            .filter(|c| Some(c.pid) == game_pid && c.state == "已连接")
-            .filter_map(|c| c.remote.clone())
-            .collect();
-        if game_endpoints != last_endpoints {
-            event(
-                &mut writer,
-                &mut events,
-                start,
-                "game_connections",
-                "info",
-                format!(
-                    "游戏已连接远端：{}。连接变化可能来自切图。",
-                    if game_endpoints.is_empty() {
-                        "暂无".into()
-                    } else {
-                        game_endpoints
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    }
-                ),
-            )?;
-            last_endpoints = game_endpoints;
-        }
         let mut list = vec![];
         if let Some(a) = env
             .adapters
@@ -630,36 +757,44 @@ fn run(
                 port: None,
             });
         }
-        for e in config.server.endpoints.iter().take(4) {
+        for ip in &tracker.snapshot.probe_ips {
+            let direct = tracker
+                .snapshot
+                .endpoints
+                .iter()
+                .any(|e| &e.ip == ip && e.source == "game" && e.state != "inactive");
+            list.push(Target {
+                ip: ip.clone(),
+                label: format!(
+                    "{} {ip}",
+                    if direct {
+                        "游戏连接"
+                    } else {
+                        "加速/代理候选"
+                    }
+                ),
+                role: if direct { "game" } else { "relay" }.into(),
+                port: config
+                    .server
+                    .endpoints
+                    .iter()
+                    .find(|e| &e.ip == ip)
+                    .map(|e| e.port),
+            });
+        }
+        for e in config
+            .server
+            .endpoints
+            .iter()
+            .take(4)
+            .filter(|e| !tracker.snapshot.probe_ips.contains(&e.ip))
+        {
             list.push(Target {
                 ip: e.ip.clone(),
                 label: config.server.name.clone(),
                 role: "server".into(),
                 port: Some(e.port),
             });
-        }
-        let mut candidates: Vec<_> = latest_connections
-            .iter()
-            .filter(|c| Some(c.pid) == game_pid && c.state == "已连接")
-            .filter_map(|c| c.remote_ip.clone())
-            .filter(|ip| ip.parse().is_ok_and(catalog::public_v4))
-            .collect();
-        candidates.sort();
-        candidates.dedup();
-        let mut count = 0;
-        for ip in candidates {
-            if count >= 3 {
-                break;
-            }
-            if !list.iter().any(|t| t.ip == ip) {
-                list.push(Target {
-                    label: format!("游戏远端 {ip}"),
-                    ip,
-                    role: "game".into(),
-                    port: None,
-                });
-                count += 1;
-            }
         }
         *targets.lock().unwrap() = list;
         let tick = Tick {
@@ -671,6 +806,7 @@ fn run(
             traffic,
             traffic_status: status.clone(),
             game_pid,
+            tracking: tracker.snapshot.clone(),
         };
         record(&mut writer, "tick", &tick)?;
         {
@@ -684,6 +820,8 @@ fn run(
                     }
                     Measurement::Hop(h) => {
                         record(&mut writer, "hop", &h)?;
+                        v.hops
+                            .retain(|old| old.target != h.target || old.ttl != h.ttl);
                         v.hops.push(h);
                     }
                 }
@@ -755,7 +893,10 @@ fn run(
         )?;
     }
     monitor.flush();
-    let (_, final_status) = monitor.sample();
+    let (_, tail_flows, final_status) = monitor.sample();
+    if !tail_flows.is_empty() {
+        record(&mut writer, "game_flows_tail", &tail_flows)?;
+    }
     if final_status.events >= status.events {
         status = final_status;
     }
@@ -775,7 +916,7 @@ fn run(
     record(&mut writer, "activities", &activities)?;
     writer.flush().map_err(|e| e.to_string())?;
     writer.get_ref().sync_data().map_err(|e| e.to_string())?;
-    let mut limitations=vec!["仅覆盖测试时段与可测目标；ICMP 超时不是游戏丢包率，TCP 建连不是业务延迟。".into(),"中间路由节点不回应不能单独证明链路丢包；无法仅凭单端观测区分去程、回程与服务端内部问题。".into(),"每进程流量是 ETW 观测字节，存在交付延迟；代理、加速器和回环流量可能重复观察，不能简单相加。".into(),"无法读取创建时间的进程不归属流量；短连接、IPv6 主动探测、UDP 远端关联、帧时间与 TCP 重传尚未覆盖。".into(),"本机看不到家庭其他设备占用、光猫光功率及真实宽带带宽上限。".into()];
+    let mut limitations=vec!["仅覆盖测试时段与可测目标；ICMP 超时不是游戏丢包率，TCP 建连不是业务延迟。".into(),"中间路由节点不回应不能单独证明链路丢包；无法仅凭单端观测区分去程、回程与服务端内部问题。".into(),"每进程流量是 ETW 观测字节，存在交付延迟；代理、加速器和回环流量可能重复观察，不能简单相加。".into(),"无法读取创建时间的进程不归属流量；IPv6 主动探测、帧时间与 TCP 重传尚未覆盖。游戏 UDP 远端依赖可用的网络事件。".into(),"连接变化可能来自地图、跨服或其他业务，不能证明物理服务器切换；同一接入地址背后的转发不可见。目录匹配只标识已知接入地址。".into(),"本机看不到家庭其他设备占用、光猫光功率及真实宽带带宽上限。".into()];
     limitations.extend(env.notes.clone());
     if status.lost_events > 0 || status.unparsed_events > 0 {
         limitations.push(format!(
@@ -783,7 +924,8 @@ fn run(
             status.lost_events, status.unparsed_events
         ));
     }
-    let report = Report {
+    let mut report = Report {
+        schema_version: 2,
         id,
         started_at,
         ended_at: now(),
@@ -797,7 +939,16 @@ fn run(
         traffic_status: status,
         limitations,
         log_dir: dir.to_string_lossy().into(),
+        game_endpoints: tracker.snapshot.endpoints.clone(),
+        transitions: tracker.transitions,
+        connection_changes: tracker.connection_changes,
+        relay_processes: relay_history.into_values().collect(),
+        summary: ReportSummary::default(),
     };
+    report
+        .findings
+        .extend(analysis::transition_findings(&report, &probes));
+    report.summary = analysis::summarize(&report);
     fs::write(dir.join("report.html"), analysis::html(&report))
         .map_err(|e| format!("报告写入失败：{e}"))?;
     fs::write(

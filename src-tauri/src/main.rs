@@ -5,6 +5,7 @@ mod model;
 mod platform;
 mod probe;
 mod session;
+mod tracking;
 mod traffic;
 
 use model::*;
@@ -33,6 +34,30 @@ async fn get_environment() -> Result<Environment, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn inspect_game(
+    state: State<'_, Manager>,
+    pid: u32,
+    started: String,
+) -> Result<serde_json::Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = platform::process(pid, "").0;
+        if p.started.as_deref() != Some(started.as_str()) {
+            return Err("进程身份已变化，请刷新进程列表".into());
+        }
+        let (connections, errors) = platform::connections();
+        let catalog = catalog::load(&root, false);
+        let matches = tracking::match_servers(pid, &connections, &catalog.servers);
+        let relays = tracking::relay_pids(pid, &connections)
+            .into_iter()
+            .map(|pid| platform::process(pid, "").0)
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({"matches":matches,"relays":relays,"errors":errors}))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn start_test(state: State<'_, Manager>, config: StartConfig) -> Result<String, String> {
@@ -83,13 +108,23 @@ fn main() {
             .unwrap_or(8)
             .clamp(2, 60);
         let catalog = catalog::load(&root, false);
+        let requested_server = args
+            .windows(2)
+            .find(|a| a[0] == "--server")
+            .map(|a| a[1].as_str())
+            .unwrap_or("绝代天骄");
         let selected = catalog
             .servers
             .iter()
-            .find(|s| s.name == "绝代天骄")
+            .find(|s| s.name == requested_server)
             .unwrap_or(&catalog.servers[0])
             .clone();
-        let p = platform::process(std::process::id(), "").0;
+        let selected_pid = args
+            .windows(2)
+            .find(|a| a[0] == "--game-pid")
+            .and_then(|a| a[1].parse().ok())
+            .unwrap_or(std::process::id());
+        let p = platform::process(selected_pid, "").0;
         let config = StartConfig {
             server: selected,
             duration_seconds: seconds,
@@ -128,6 +163,7 @@ fn main() {
             get_catalog,
             get_processes,
             get_environment,
+            inspect_game,
             start_test,
             stop_test,
             mark_event,

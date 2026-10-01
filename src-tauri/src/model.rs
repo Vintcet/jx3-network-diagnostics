@@ -91,6 +91,61 @@ pub struct TrafficStatus {
     pub events: u64,
     pub lost_events: u32,
     pub unparsed_events: u64,
+    #[serde(default)]
+    pub endpoint_events: u64,
+    #[serde(default)]
+    pub endpoint_errors: u64,
+}
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameEndpoint {
+    pub id: String,
+    pub ip: String,
+    pub port: u16,
+    pub protocol: String,
+    pub first_seen: f64,
+    pub last_seen: f64,
+    pub last_active: Option<f64>,
+    pub sent: u64,
+    pub received: u64,
+    pub state: String,
+    pub probing: bool,
+    pub catalog_names: Vec<String>,
+    pub source: String,
+    pub process_name: String,
+    pub pid: u32,
+}
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameTracking {
+    pub primary_id: Option<String>,
+    pub primary_ip: Option<String>,
+    pub endpoints: Vec<GameEndpoint>,
+    pub probe_ips: Vec<String>,
+    pub message: String,
+    pub relays: Vec<ProcessInfo>,
+}
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportSummary {
+    pub headline: String,
+    pub facts: Vec<String>,
+    pub next_step: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointChange {
+    pub elapsed: f64,
+    pub kind: String,
+    pub endpoint: GameEndpoint,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetTransition {
+    pub elapsed: f64,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub reason: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +163,8 @@ pub struct Probe {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hop {
+    #[serde(default)]
+    pub target: String,
     pub ttl: u8,
     pub address: Option<String>,
     pub ms: Option<f64>,
@@ -133,6 +190,8 @@ pub struct Tick {
     pub traffic: Vec<Traffic>,
     pub traffic_status: TrafficStatus,
     pub game_pid: Option<u32>,
+    #[serde(default)]
+    pub tracking: GameTracking,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +233,8 @@ pub struct Finding {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
+    #[serde(default)]
+    pub schema_version: u32,
     pub id: String,
     pub started_at: String,
     pub ended_at: String,
@@ -187,6 +248,16 @@ pub struct Report {
     pub traffic_status: TrafficStatus,
     pub limitations: Vec<String>,
     pub log_dir: String,
+    #[serde(default)]
+    pub game_endpoints: Vec<GameEndpoint>,
+    #[serde(default)]
+    pub transitions: Vec<TargetTransition>,
+    #[serde(default)]
+    pub connection_changes: Vec<EndpointChange>,
+    #[serde(default)]
+    pub relay_processes: Vec<ProcessInfo>,
+    #[serde(default)]
+    pub summary: ReportSummary,
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -47,6 +47,7 @@ try:
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.wait_for_load_state('domcontentloaded')
         expect(page.get_by_role('button', name='开始测试', exact=True)).to_be_enabled(timeout=20000)
+        expect(page.get_by_role('heading', name='自动跟随游戏连接')).to_be_visible()
         page.screenshot(path=str(out / 'ready.png'), full_page=True)
         # JS communicates through the very same IPC implementation used by the UI.
         processes = page.evaluate("window.__TAURI_INTERNALS__.invoke('get_processes')")
@@ -91,6 +92,18 @@ try:
         expect(page.get_by_role('button', name='查看报告').first).to_be_enabled(timeout=10000)
         page.get_by_role('button', name='查看报告').first.click()
         expect(page.get_by_role('heading', name='诊断报告', exact=True)).to_be_visible()
+        expect(page.get_by_text('先看结论', exact=True)).to_be_visible()
+        saved = page.evaluate("window.__TAURI_INTERNALS__.invoke('get_history')")
+        previous = next((h for h in saved if h['id'] != view['id'] and h['status'] == 'completed' and h['durationSeconds'] >= 60), None)
+        if previous:
+            restored = page.evaluate("id => window.__TAURI_INTERNALS__.invoke('get_report', {id})", previous['id'])
+            assert restored['summary']['headline'] and restored['summary']['facts']
+            (out / 'restored-report.json').write_text(json.dumps(restored, ensure_ascii=False, indent=2), encoding='utf-8')
+            page.get_by_role('button', name='测试记录', exact=True).click()
+            index = next(i for i, item in enumerate(saved) if item['id'] == previous['id'])
+            page.locator('.history-row').nth(index).get_by_role('button', name='查看报告').click()
+            expect(page.get_by_text(restored['summary']['headline'], exact=True)).to_be_visible()
+            page.screenshot(path=str(out / 'restored-report.png'), full_page=True)
         assert not errors, errors
         # Send a normal WM_CLOSE so the app runs its own shutdown/ETW cleanup.
         import ctypes

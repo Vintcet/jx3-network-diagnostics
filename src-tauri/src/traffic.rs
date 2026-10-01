@@ -3,6 +3,7 @@ use crate::model::TrafficStatus;
 use std::{
     collections::HashMap,
     mem::size_of,
+    net::{Ipv4Addr, Ipv6Addr},
     ptr::null,
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -18,12 +19,28 @@ pub struct Bytes {
     pub sent: u64,
     pub earliest: u64,
 }
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameFlow {
+    pub pid: u32,
+    pub protocol: String,
+    pub local: String,
+    pub ip: String,
+    pub port: u16,
+    pub sent: u64,
+    pub received: u64,
+}
 #[derive(Default)]
 struct Shared {
     bytes: HashMap<u32, Bytes>,
     events: u64,
     unparsed: u64,
+    watched: HashMap<u32, u64>,
+    flows: HashMap<FlowKey, GameFlow>,
+    endpoint_events: u64,
+    endpoint_errors: u64,
 }
+type FlowKey = (u32, String, String, u16, String);
 pub struct TrafficMonitor {
     control: CONTROLTRACE_HANDLE,
     consumer: PROCESSTRACE_HANDLE,
@@ -55,6 +72,48 @@ unsafe fn u32_property(record: *const EVENT_RECORD, name: *const u16) -> Option<
     } else {
         None
     }
+}
+unsafe fn property_bytes(
+    record: *const EVENT_RECORD,
+    name: *const u16,
+    size: u32,
+) -> Option<[u8; 16]> {
+    let desc = PROPERTY_DATA_DESCRIPTOR {
+        PropertyName: name as u64,
+        ArrayIndex: u32::MAX,
+        Reserved: 0,
+    };
+    let mut bytes = [0u8; 16];
+    (TdhGetProperty(record, 0, null(), 1, &desc, size, bytes.as_mut_ptr()) == 0).then_some(bytes)
+}
+unsafe fn endpoint(record: *const EVENT_RECORD, outgoing: bool) -> Option<(String, u16, String)> {
+    let v6 = matches!((*record).EventHeader.EventDescriptor.Id, 26 | 27 | 58 | 59);
+    let size = if v6 { 16 } else { 4 };
+    let source = property_bytes(record, w!("saddr"), size)?;
+    let dest = property_bytes(record, w!("daddr"), size)?;
+    let source_port = property_bytes(record, w!("sport"), 2)?;
+    let dest_port = property_bytes(record, w!("dport"), 2)?;
+    let address = |bytes: [u8; 16]| {
+        if v6 {
+            Ipv6Addr::from(bytes).to_string()
+        } else {
+            Ipv4Addr::from(<[u8; 4]>::try_from(&bytes[..4]).unwrap()).to_string()
+        }
+    };
+    let (remote, port, local, local_port) = if outgoing {
+        (dest, dest_port, source, source_port)
+    } else {
+        (source, source_port, dest, dest_port)
+    };
+    Some((
+        address(remote),
+        u16::from_be_bytes([port[0], port[1]]),
+        format!(
+            "{}:{}",
+            address(local),
+            u16::from_be_bytes([local_port[0], local_port[1]])
+        ),
+    ))
 }
 unsafe extern "system" fn callback(record: *mut EVENT_RECORD) {
     if record.is_null() || (*record).UserContext.is_null() {
@@ -91,12 +150,60 @@ unsafe extern "system" fn callback(record: *mut EVENT_RECORD) {
             } else {
                 b.earliest.min(at)
             };
+            if s.watched.get(&pid).is_some_and(|created| at >= *created) {
+                let outgoing = matches!(opcode, 10 | 42);
+                if let Some((ip, port, local)) = endpoint(record, outgoing) {
+                    s.endpoint_events += 1;
+                    let protocol = format!(
+                        "{}{}",
+                        if matches!(opcode, 42 | 43) {
+                            "UDP"
+                        } else {
+                            "TCP"
+                        },
+                        if ip.contains(':') { "6" } else { "4" }
+                    );
+                    let key = (pid, protocol.clone(), ip.clone(), port, local.clone());
+                    if s.flows.len() < 1024 || s.flows.contains_key(&key) {
+                        let flow = s.flows.entry(key).or_insert_with(|| GameFlow {
+                            pid,
+                            protocol,
+                            local,
+                            ip,
+                            port,
+                            ..Default::default()
+                        });
+                        if outgoing {
+                            flow.sent += size as u64;
+                        } else {
+                            flow.received += size as u64;
+                        }
+                    } else {
+                        s.endpoint_errors += 1;
+                    }
+                } else {
+                    s.endpoint_errors += 1;
+                }
+            }
         } else {
             s.unparsed += 1;
         }
     }
 }
 impl TrafficMonitor {
+    pub fn set_processes(&mut self, identities: HashMap<u32, u64>) {
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if s.watched != identities {
+            let retained = s
+                .watched
+                .iter()
+                .filter(|(pid, created)| identities.get(pid) == Some(created))
+                .map(|(pid, _)| *pid)
+                .collect::<std::collections::HashSet<_>>();
+            s.flows.retain(|_, flow| retained.contains(&flow.pid));
+            s.watched = identities;
+        }
+    }
     pub fn start() -> Self {
         let name: Vec<u16> = format!(
             "Jx3Net-{}-{}",
@@ -178,7 +285,7 @@ impl TrafficMonitor {
         }
         m
     }
-    pub fn sample(&mut self) -> (HashMap<u32, Bytes>, TrafficStatus) {
+    pub fn sample(&mut self) -> (HashMap<u32, Bytes>, Vec<GameFlow>, TrafficStatus) {
         if self
             .worker
             .as_ref()
@@ -218,12 +325,15 @@ impl TrafficMonitor {
         });
         (
             std::mem::take(&mut s.bytes),
+            std::mem::take(&mut s.flows).into_values().collect(),
             TrafficStatus {
                 available,
                 message,
                 events: s.events,
                 lost_events: lost,
                 unparsed_events: s.unparsed,
+                endpoint_events: s.endpoint_events,
+                endpoint_errors: s.endpoint_errors,
             },
         )
     }
