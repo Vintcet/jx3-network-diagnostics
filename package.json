@@ -1,7 +1,7 @@
 {
   "name": "jx3-network-diagnostics",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "releaseDate": "2026-10-02",
   "author": "兰舟少住",
   "type": "module",

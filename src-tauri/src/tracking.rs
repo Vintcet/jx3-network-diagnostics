@@ -106,11 +106,8 @@ impl GameTracker {
                 .filter(|(_, v)| v.endpoint.state == "inactive")
                 .min_by(|a, b| a.1.endpoint.last_seen.total_cmp(&b.1.endpoint.last_seen))
                 .map(|(id, _)| id.clone());
-            if let Some(id) = expired {
-                self.endpoints.remove(&id);
-            } else {
-                return None;
-            }
+            let expired_id = expired?;
+            self.endpoints.remove(&expired_id);
         }
         let names = self
             .catalog

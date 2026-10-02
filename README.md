@@ -2,7 +2,7 @@
 
 **JX3 Network Diagnostics** 是面向 Windows 的剑网三网络诊断工具。遇到游戏卡顿、掉线或延迟波动时，选择区服和测试时长，工具会持续观测网关、公网参照、区服接入地址、游戏进程及本机其他程序的网络活动，保存日志并生成中文分析报告。
 
-当前版本：**0.4.0** · 更新日期：**2026-10-02** · 作者：**兰舟少住**。技术栈：Tauri 2、React 19、TypeScript、Rust、Windows 网络 API / ETW。
+当前版本：**0.4.1** · 更新日期：**2026-10-02** · 作者：**兰舟少住**。技术栈：Tauri 2、React 19、TypeScript、Rust、Windows 网络 API / ETW。
 
 开源地址：[Vintcet/jx3-network-diagnostics](https://github.com/Vintcet/jx3-network-diagnostics)。下载安装包与单文件 EXE：[最新版本](https://github.com/Vintcet/jx3-network-diagnostics/releases/latest)。
 
@@ -122,8 +122,8 @@ npm run build
 | --- | --- |
 | `jx3-network-diagnostics.exe` | 每次正式构建复制到根目录的程序，文件被占用时改用带版本号的文件名 |
 | `release/jx3-network-diagnostics.exe` | 单文件程序，依赖已安装的 WebView2 |
-| `release/jx3-network-diagnostics-0.4.0.exe` | 带版本号的程序，旧 EXE 正在运行时也可使用 |
-| `release/jx3-network-diagnostics-0.4.0-x64-setup.exe` | Windows 安装包 |
+| `release/jx3-network-diagnostics-0.4.1.exe` | 带版本号的程序，旧 EXE 正在运行时也可使用 |
+| `release/jx3-network-diagnostics-0.4.1-x64-setup.exe` | Windows 安装包 |
 | `release/使用说明.txt` | 面向使用者的简明说明 |
 | `release/SHA256SUMS.txt` | EXE 和安装包校验值 |
 
