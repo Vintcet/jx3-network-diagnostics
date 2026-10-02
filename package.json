@@ -1,14 +1,16 @@
 {
   "name": "jx3-network-diagnostics",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
+  "releaseDate": "2026-10-02",
+  "author": "兰舟少住",
   "type": "module",
   "scripts": {
     "dev": "scripts\\desktop.cmd dev",
     "dev:web": "vite --host 127.0.0.1",
     "build:web": "tsc --noEmit && vite build",
     "build": "scripts\\desktop.cmd build",
-    "check": "tsc --noEmit",
+    "check": "node scripts/check-release.mjs && tsc --noEmit",
     "tauri": "tauri"
   },
   "dependencies": {

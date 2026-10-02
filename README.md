@@ -2,7 +2,9 @@
 
 **JX3 Network Diagnostics** 是面向 Windows 的剑网三网络诊断工具。遇到游戏卡顿、掉线或延迟波动时，选择区服和测试时长，工具会持续观测网关、公网参照、区服接入地址、游戏进程及本机其他程序的网络活动，保存日志并生成中文分析报告。
 
-当前版本：**0.3.0**。技术栈：Tauri 2、React 19、TypeScript、Rust、Windows 网络 API / ETW。
+当前版本：**0.4.0** · 更新日期：**2026-10-02** · 作者：**兰舟少住**。技术栈：Tauri 2、React 19、TypeScript、Rust、Windows 网络 API / ETW。
+
+开源地址：[Vintcet/jx3-network-diagnostics](https://github.com/Vintcet/jx3-network-diagnostics)。下载安装包与单文件 EXE：[最新版本](https://github.com/Vintcet/jx3-network-diagnostics/releases/latest)。
 
 版本变化见[更新记录](CHANGELOG.md)。
 
@@ -99,7 +101,7 @@ ICMP 超时不是游戏丢包率，TCP 建连耗时不是游戏内延迟。全�
 - Visual Studio 2022 Build Tools 的“使用 C++ 的桌面开发”组件和 Windows SDK。
 - Microsoft Edge WebView2 运行时。
 
-这是私有仓库，克隆需要具有仓库访问权限的 GitHub 账号。
+这是公开仓库，可直接克隆源码。
 
 ```powershell
 git clone https://github.com/Vintcet/jx3-network-diagnostics.git
@@ -118,11 +120,16 @@ npm run build
 
 | 本地产物 | 用途 |
 | --- | --- |
+| `jx3-network-diagnostics.exe` | 每次正式构建复制到根目录的程序，文件被占用时改用带版本号的文件名 |
 | `release/jx3-network-diagnostics.exe` | 单文件程序，依赖已安装的 WebView2 |
-| `release/jx3-network-diagnostics-0.3.0.exe` | 带版本号的程序，旧 EXE 正在运行时也可使用 |
-| `release/jx3-network-diagnostics-0.3.0-x64-setup.exe` | Windows 安装包 |
+| `release/jx3-network-diagnostics-0.4.0.exe` | 带版本号的程序，旧 EXE 正在运行时也可使用 |
+| `release/jx3-network-diagnostics-0.4.0-x64-setup.exe` | Windows 安装包 |
 | `release/使用说明.txt` | 面向使用者的简明说明 |
 | `release/SHA256SUMS.txt` | EXE 和安装包校验值 |
+
+启动后自动检查 GitHub Releases，也可从左下角手动检查。发现新版后点击“下载并安装”，校验签名后安装并重启；测试进行中或正在保存报告时禁止安装。单文件版更新后请从开始菜单启动安装版，原有记录保留。0.3.0 及更早版本需要手动下载安装一次新版。
+
+本地构建自动读取 `.secrets/` 中的签名密钥；公开源码没有私钥时仍可构建 EXE 和安装包，但不会生成更新清单。正式发布推送 `v版本号` 标签，由 GitHub Actions 构建并发布，见[发布与自动更新](docs/发布与自动更新.md)。
 
 `.cargo/config.toml` 使用 rsproxy Cargo 镜像；`package-lock.json` 固定前端依赖版本。`scripts/tauri.test.conf.json` 只用于自动化测试，正式构建不应传入该配置。
 

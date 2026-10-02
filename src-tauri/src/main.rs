@@ -9,6 +9,7 @@ mod sample_log;
 mod session;
 mod tracking;
 mod traffic;
+mod updater;
 
 use model::*;
 use session::Manager;
@@ -62,8 +63,12 @@ async fn inspect_game(
     .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn start_test(state: State<'_, Manager>, config: StartConfig) -> Result<String, String> {
-    state.start(config, false)
+fn start_test(
+    state: State<'_, Manager>,
+    updates: State<'_, updater::UpdateState>,
+    config: StartConfig,
+) -> Result<String, String> {
+    updates.start_test(&state, config)
 }
 #[tauri::command]
 fn stop_test(state: State<'_, Manager>) {
@@ -104,6 +109,15 @@ fn open_logs(state: State<'_, Manager>, id: String) -> Result<(), String> {
     let dir = state.directory(&id)?;
     std::process::Command::new("explorer.exe")
         .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_repository() -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg("https://github.com/Vintcet/jx3-network-diagnostics")
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -214,6 +228,8 @@ fn main() {
         return;
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::UpdateState::default())
         .setup(|app| {
             let root = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&root)?;
@@ -232,7 +248,10 @@ fn main() {
             get_history,
             get_report,
             export_report,
-            open_logs
+            open_logs,
+            open_repository,
+            updater::check_update,
+            updater::install_update
         ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {

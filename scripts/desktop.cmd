@@ -8,7 +8,10 @@ if exist "%VSWHERE%" for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -pr
 if "%VSINSTALL%"=="" exit /b 2
 call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
 if errorlevel 1 exit /b %errorlevel%
-call npm run tauri -- %MODE%
+if /I "%MODE%"=="build" goto build
+call npm run tauri -- dev
 if errorlevel 1 exit /b %errorlevel%
-if /I "%MODE%"=="build" powershell -NoProfile -File "%~dp0package-release.ps1"
+exit /b %errorlevel%
+:build
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build-release.ps1"
 exit /b %errorlevel%

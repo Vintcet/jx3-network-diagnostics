@@ -49,6 +49,7 @@ try:
         page.wait_for_load_state('domcontentloaded')
         expect(page.get_by_role('button', name='开始测试', exact=True)).to_be_enabled(timeout=20000)
         expect(page.get_by_role('heading', name='自动跟随游戏连接')).to_be_visible()
+        expect(page.locator('.app-meta')).to_contain_text('兰舟少住')
         page.screenshot(path=str(out / 'ready.png'), full_page=True)
         # JS communicates through the very same IPC implementation used by the UI.
         processes = page.evaluate("window.__TAURI_INTERNALS__.invoke('get_processes')")
@@ -60,6 +61,11 @@ try:
         page.get_by_role('spinbutton', name='自定义分钟数').fill('1')
         page.get_by_role('button', name='开始测试', exact=True).click()
         expect(page.get_by_role('button', name='结束并分析', exact=True)).to_be_enabled(timeout=10000)
+        install_error = page.evaluate("""async () => {
+            try { await window.__TAURI_INTERNALS__.invoke('install_update', {onProgress: '__CHANNEL__:999999'}); return ''; }
+            catch (e) { return String(e); }
+        }""")
+        assert '请先结束测试' in install_error or '更新操作正在进行' in install_error, install_error
         for _ in range(60):
             measured = page.evaluate("window.__TAURI_INTERNALS__.invoke('get_session')")
             if len(measured['probes']) > 4:

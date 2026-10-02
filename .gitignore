@@ -4,6 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 .tmp/
 release/
+/.secrets/
+/jx3-network-diagnostics*.exe
 *.log
 
 # Local design document: keep on this computer, never commit.
