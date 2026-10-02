@@ -15,6 +15,8 @@ with sync_playwright() as p:
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto('http://127.0.0.1:5173')
     page.wait_for_load_state('networkidle')
+    page.screenshot(path=str(out / 'startup-notice.png'))
+    page.get_by_role('dialog', name='开始诊断前的小提示').get_by_role('button', name='关闭', exact=True).click()
     expect(page.get_by_role('button', name='开始测试', exact=True)).to_be_disabled()
     expect(page.get_by_text('当前为浏览器界面预览。', exact=False)).to_be_visible()
     expect(page.locator('.app-meta')).to_contain_text('兰舟少住')

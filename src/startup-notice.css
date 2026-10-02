@@ -1,0 +1,16 @@
+.startup-dialog{width:min(560px,calc(100% - 32px));max-height:calc(100% - 32px);margin:auto;padding:0;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);color:var(--text);box-shadow:0 20px 64px color-mix(in srgb,var(--text) 20%,transparent);overflow:hidden}
+.startup-dialog[open]{display:flex;flex-direction:column}
+.startup-dialog::backdrop{background:color-mix(in srgb,var(--text) 42%,transparent)}
+.startup-heading{display:flex;align-items:center;gap:12px;padding:24px 28px 0;flex-shrink:0}
+.startup-heading>svg{color:var(--blue)}
+.startup-heading h2{font-size:20px;line-height:1.4}
+.startup-body{padding:16px 28px 24px;overflow-y:auto;overscroll-behavior:contain;font-size:14px;line-height:1.75}
+.startup-body ol{margin:20px 0 0;padding-left:24px}
+.startup-body li{padding-left:4px}
+.startup-body li+li{margin-top:18px}
+.startup-body li::marker{color:var(--blue);font-weight:650}
+.startup-body h3{font-size:15px;font-weight:650;margin-bottom:4px}
+.startup-body p{overflow-wrap:anywhere}
+.startup-actions{display:flex;justify-content:flex-end;padding:16px 28px;border-top:1px solid var(--border);flex-shrink:0}
+.startup-actions .button{min-width:88px}
+@media(max-width:420px){.startup-heading{padding:20px 20px 0;gap:8px}.startup-heading h2{font-size:18px}.startup-body{padding:14px 20px 20px}.startup-actions{padding:14px 20px}}

@@ -47,6 +47,7 @@ try:
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.wait_for_load_state('domcontentloaded')
+        page.get_by_role('dialog', name='开始诊断前的小提示').get_by_role('button', name='关闭', exact=True).click()
         expect(page.get_by_role('button', name='开始测试', exact=True)).to_be_enabled(timeout=20000)
         expect(page.get_by_role('heading', name='自动跟随游戏连接')).to_be_visible()
         expect(page.locator('.app-meta')).to_contain_text('兰舟少住')

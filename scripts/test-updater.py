@@ -46,6 +46,7 @@ with sync_playwright() as p:
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.add_init_script(mock)
     page.goto('http://127.0.0.1:5173')
+    page.get_by_role('dialog', name='开始诊断前的小提示').get_by_role('button', name='关闭', exact=True).click()
     expect(page.get_by_text('新版本 v0.5.0', exact=True)).to_be_visible(timeout=8000)
     assert page.evaluate('window.updateChecks') == 1, 'Startup should check once'
     page.get_by_text('查看更新内容', exact=True).click()
@@ -72,6 +73,7 @@ with sync_playwright() as p:
     page.screenshot(path=str(out / 'installing.png'), full_page=True)
 
     page.reload()
+    page.get_by_role('dialog', name='开始诊断前的小提示').get_by_role('button', name='关闭', exact=True).click()
     page.evaluate('window.failCheck = true')
     expect(page.get_by_role('button', name='检查失败，重试')).to_be_visible(timeout=8000)
     expect(page.get_by_role('region', name='软件更新')).not_to_be_visible()
